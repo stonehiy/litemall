@@ -24,7 +24,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-tomcat</artifactId>
-            <scope>provided</scope>
+            <scope>compile</scope>
+            <!--https://blog.csdn.net/beagreatprogrammer/article/details/78611494?locationnum=10&fps=1-->
+            <!-- Failed to parse configuration class [org.linlinjava.litemall.Application]; nested exception is java.lang.IllegalStateException: Failed to introspect annotated methods on class org.springframework.boot.web.support.SpringBootServletInitializer-->
+            <!--  <scope>provided</scope>-->
         </dependency>
 
         <dependency>
