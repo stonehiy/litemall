@@ -41,8 +41,12 @@ public class OrderUtil {
             return "未付款";
         }
 
-        if (status == 102 || status == 103) {
+        if (status == 102) {
             return "已取消";
+        }
+
+        if (status == 103) {
+            return "已取消(系统)";
         }
 
         if (status == 201) {
@@ -66,8 +70,7 @@ public class OrderUtil {
             return "已收货(系统)";
         }
 
-        Assert.state(false, "orderStatus不支持");
-        return "";
+        throw new IllegalStateException("orderStatus不支持");
     }
 
 
@@ -106,8 +109,9 @@ public class OrderUtil {
             handleOption.setRebuy(true);
         }
         else {
-            Assert.state(false, "status不支持");
+            throw new IllegalStateException("status不支持");
         }
+
         return handleOption;
     }
 
@@ -137,8 +141,9 @@ public class OrderUtil {
             status.add((short)401);
         }
         else {
-            Assert.state(false, "showType不支持");
+            return null;
         }
+
         return status;
     }
 
