@@ -2,6 +2,7 @@ package org.linlinjava.litemall.wx.web;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.linlinjava.litemall.core.util.RegexUtil;
 import org.linlinjava.litemall.db.domain.LitemallAddress;
 import org.linlinjava.litemall.db.service.LitemallAddressService;
 import org.linlinjava.litemall.db.service.LitemallRegionService;
@@ -140,6 +141,12 @@ public class WxAddressController {
             return ResponseUtil.badArgument();
         }
 
+        // 测试收货手机号码是否正确
+        String mobile = address.getMobile();
+        if(!RegexUtil.isMobileExact(mobile)){
+            return ResponseUtil.badArgument();
+        }
+
         if(address.getIsDefault()){
             // 重置其他收获地址的默认选项
             addressService.resetDefault(userId);
@@ -153,7 +160,7 @@ public class WxAddressController {
             address.setUserId(userId);
             addressService.update(address);
         }
-        return ResponseUtil.ok();
+        return ResponseUtil.ok(address.getId());
     }
 
     /**

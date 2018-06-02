@@ -62,6 +62,7 @@ public class LitemallOrderService {
         return (int)orderMapper.countByExample(example);
     }
 
+    // TODO 这里应该产生一个唯一的订单，但是实际上这里仍然存在两个订单相同的可能性
     public String generateOrderSn(Integer userId) {
         DateTimeFormatter df = DateTimeFormatter.ofPattern("yyyyMMdd");
         String now = df.format(LocalDate.now());
@@ -135,12 +136,7 @@ public class LitemallOrderService {
     }
 
     public void deleteById(Integer id) {
-        LitemallOrder order = orderMapper.selectByPrimaryKey(id);
-        if(order == null){
-            return;
-        }
-        order.setDeleted(true);
-        orderMapper.updateByPrimaryKey(order);
+        orderMapper.logicalDeleteByPrimaryKey(id);
     }
 
     public int count() {
@@ -159,5 +155,11 @@ public class LitemallOrderService {
         LitemallOrderExample example = new LitemallOrderExample();
         example.or().andOrderStatusEqualTo(OrderUtil.STATUS_SHIP).andShipEndTimeIsNotNull().andDeletedEqualTo(false);
         return orderMapper.selectByExample(example);
+    }
+
+    public LitemallOrder findBySn(String orderSn) {
+        LitemallOrderExample example = new LitemallOrderExample();
+        example.or().andOrderSnEqualTo(orderSn).andDeletedEqualTo(false);
+        return orderMapper.selectOneByExample(example);
     }
 }

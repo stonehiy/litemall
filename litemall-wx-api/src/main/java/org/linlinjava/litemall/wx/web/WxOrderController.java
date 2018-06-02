@@ -1,5 +1,14 @@
 package org.linlinjava.litemall.wx.web;
 
+import com.github.binarywang.wxpay.bean.notify.WxPayNotifyResponse;
+import com.github.binarywang.wxpay.bean.notify.WxPayOrderNotifyResult;
+import com.github.binarywang.wxpay.bean.order.WxPayAppOrderResult;
+import com.github.binarywang.wxpay.bean.order.WxPayMpOrderResult;
+import com.github.binarywang.wxpay.bean.request.BaseWxPayRequest;
+import com.github.binarywang.wxpay.bean.request.WxPayUnifiedOrderRequest;
+import com.github.binarywang.wxpay.bean.result.BaseWxPayResult;
+import com.github.binarywang.wxpay.service.WxPayService;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.linlinjava.litemall.db.domain.*;
@@ -18,6 +27,8 @@ import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.util.Assert;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -53,6 +64,8 @@ public class WxOrderController {
     private PlatformTransactionManager txManager;
 
     @Autowired
+    private LitemallUserService userService;
+    @Autowired
     private LitemallOrderService orderService;
     @Autowired
     private LitemallOrderGoodsService orderGoodsService;
@@ -64,6 +77,9 @@ public class WxOrderController {
     private LitemallRegionService regionService;
     @Autowired
     private LitemallProductService productService;
+
+    @Autowired
+    private WxPayService wxPayService;
 
     public WxOrderController() {
     }
@@ -290,9 +306,10 @@ public class WxOrderController {
         def.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
         TransactionStatus status = txManager.getTransaction(def);
         Integer orderId = null;
+        LitemallOrder order = null;
         try {
             // 订单
-            LitemallOrder order = new LitemallOrder();
+            order = new LitemallOrder();
             order.setUserId(userId);
             order.setOrderSn(orderService.generateOrderSn(userId));
             order.setAddTime(LocalDateTime.now());
@@ -354,50 +371,6 @@ public class WxOrderController {
         Map<String, Object> data = new HashMap<>();
         data.put("orderId", orderId);
         return ResponseUtil.ok(data);
-    }
-
-    /**
-     * 付款订单
-     *
-     * 1. 检测当前订单是否能够付款
-     * 2. 微信支付平台返回支付订单ID
-     * 3. 设置订单付款状态
-     * TODO 与微信后台交互产生付款订单ID，以及不同的付款状态
-     * 目前这里直接设置订单已付款状态模拟支付成功
-     *
-     * @param userId 用户ID
-     * @param body   订单信息，{ orderId：xxx }
-     * @return 订单操作结果
-     * 成功则 { errno: 0, errmsg: '模拟付款支付成功' }
-     * 失败则 { errno: XXX, errmsg: XXX }
-     */
-    @RequestMapping("pay")
-    public Object payPrepay(@LoginUser Integer userId, @RequestBody String body) {
-        if(userId == null){
-            return ResponseUtil.unlogin();
-        }
-        Integer orderId = JacksonUtil.parseInteger(body, "orderId");
-        if (orderId == null) {
-            return ResponseUtil.badArgument();
-        }
-
-        LitemallOrder order = orderService.findById(orderId);
-        if (order == null) {
-            return ResponseUtil.badArgumentValue();
-        }
-        if (!order.getUserId().equals(userId)) {
-            return ResponseUtil.badArgumentValue();
-        }
-
-        // 检测是否能够取消
-        OrderHandleOption handleOption = OrderUtil.build(order);
-        if (!handleOption.isPay()) {
-            return ResponseUtil.fail(403, "订单不能支付");
-        }
-
-        order.setPayStatus(OrderUtil.STATUS_PAY);
-        orderService.updateById(order);
-        return ResponseUtil.ok("模拟付款支付成功");
     }
 
     /**
@@ -466,20 +439,21 @@ public class WxOrderController {
     }
 
     /**
-     * 付款
+     * 付款订单的预支付会话标识
+     *
      * 1. 检测当前订单是否能够付款
-     * 2. 设置订单付款状态
-     * 3. TODO 微信后台申请支付，同时设置付款状态
+     * 2. 微信支付平台返回支付订单ID
+     * 3. 设置订单付款状态
      *
      * @param userId 用户ID
      * @param body   订单信息，{ orderId：xxx }
      * @return 订单操作结果
-     * 成功则 { errno: 0, errmsg: '成功' }
+     * 成功则 { errno: 0, errmsg: '模拟付款支付成功' }
      * 失败则 { errno: XXX, errmsg: XXX }
      */
-    @PostMapping("pay")
-    public Object pay(@LoginUser Integer userId, @RequestBody String body) {
-        if (userId == null) {
+    @PostMapping("prepay")
+    public Object prepay(@LoginUser Integer userId, @RequestBody String body) {
+        if(userId == null){
             return ResponseUtil.unlogin();
         }
         Integer orderId = JacksonUtil.parseInteger(body, "orderId");
@@ -489,87 +463,105 @@ public class WxOrderController {
 
         LitemallOrder order = orderService.findById(orderId);
         if (order == null) {
-            return ResponseUtil.badArgument();
+            return ResponseUtil.badArgumentValue();
         }
         if (!order.getUserId().equals(userId)) {
             return ResponseUtil.badArgumentValue();
         }
 
-        // 检测是否能够付款
+        // 检测是否能够取消
         OrderHandleOption handleOption = OrderUtil.build(order);
         if (!handleOption.isPay()) {
-            return ResponseUtil.fail(403, "订单不能付款");
+            return ResponseUtil.fail(403, "订单不能支付");
         }
 
-        // 微信后台申请微信支付订单号
-        String payId = "";
-        // 微信支付订单号生产未支付
-        Short payStatus = 1;
+        LitemallUser user = userService.findById(userId);
+        String openid = user.getWeixinOpenid();
+        if(openid == null){
+            return ResponseUtil.fail(403, "订单不能支付");
+        }
+        WxPayMpOrderResult result = null;
+        try {
+            WxPayUnifiedOrderRequest orderRequest = new WxPayUnifiedOrderRequest();
+            orderRequest.setOutTradeNo(order.getOrderSn());
+            orderRequest.setOpenid(openid);
+            // TODO 更有意义的显示名称
+            orderRequest.setBody("litemall小商场-订单测试支付");
+            // 元转成分
+            // 这里仅支付1分
+            // TODO 这里1分钱需要改成实际订单金额
+            orderRequest.setTotalFee(1);
+            // TODO 用户IP地址
+            orderRequest.setSpbillCreateIp("123.12.12.123");
 
-        order.setOrderStatus(OrderUtil.STATUS_PAY);
-        order.setPayId(payId);
-        order.setPayStatus(payStatus);
-        orderService.update(order);
+            result = wxPayService.createOrder(orderRequest);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseUtil.fail(403, "订单不能支付");
+        }
 
-        return ResponseUtil.ok();
+        orderService.updateById(order);
+        return ResponseUtil.ok(result);
     }
 
     /**
      * 付款成功回调接口
      * 1. 检测当前订单是否是付款状态
      * 2. 设置订单付款成功状态相关信息
+     * 3. 响应微信支付平台
      *
-     * @param userId 用户ID
-     * @param body   订单信息，{ orderId：xxx, payId: xxx }
+     * @param request
+     * @param response
      * @return 订单操作结果
-     * 成功则 { errno: 0, errmsg: '成功' }
-     * 失败则 { errno: XXX, errmsg: XXX }
-     * <p>
-     * 注意，这里pay_notify是示例地址，开发者应该设立一个隐蔽的回调地址
-     * TODO 这里需要根据微信支付文档设计
+     * 成功则 WxPayNotifyResponse.success的XML内容
+     * 失败则 WxPayNotifyResponse.fail的XML内容
+     *
+     * 注意，这里pay-notify是示例地址，开发者应该设立一个隐蔽的回调地址
      */
-    @PostMapping("pay_notify")
-    public Object pay_notify(@LoginUser Integer userId, @RequestBody String body) {
-        if (userId == null) {
-            return ResponseUtil.unlogin();
-        }
-        Integer orderId = JacksonUtil.parseInteger(body, "orderId");
-        Integer payId = JacksonUtil.parseInteger(body, "payId");
-        if (orderId == null || payId == null) {
-            return ResponseUtil.badArgument();
-        }
+    @PostMapping("pay-notify")
+    public Object payNotify(HttpServletRequest request, HttpServletResponse response) {
+        try {
+            String xmlResult = IOUtils.toString(request.getInputStream(), request.getCharacterEncoding());
+            WxPayOrderNotifyResult result = wxPayService.parseOrderNotifyResult(xmlResult);
 
-        LitemallOrder order = orderService.findById(orderId);
-        if (order == null) {
-            return ResponseUtil.badArgument();
-        }
-        if (!order.getUserId().equals(userId)) {
-            return ResponseUtil.badArgumentValue();
-        }
+            String orderSn = result.getOutTradeNo();
+            String payId = result.getTransactionId();
+            // 分转化成元
+            String totalFee = BaseWxPayResult.feeToYuan(result.getTotalFee());
 
-        // 检测是否是付款状态
-        if (!order.getOrderStatus().equals(OrderUtil.STATUS_PAY)) {
-            logger.error("系统内部错误");
-        }
-        if (!order.getPayId().equals(String.valueOf(payId))) {
-            logger.error("系统内部错误");
-        }
+            LitemallOrder order = orderService.findBySn(orderSn);
+            if(order == null){
+                throw new Exception("订单不存在 sn=" + orderSn);
+            }
 
-        Short payStatus = (short) 2;
-        order.setPayStatus(payStatus);
-        order.setPayTime(LocalDateTime.now());
-        orderService.update(order);
+            // 检查这个订单是否已经处理过
+            if(OrderUtil.isPayStatus(order) && order.getPayId() != null){
+                return WxPayNotifyResponse.success("处理成功!");
+            }
 
-        return ResponseUtil.ok();
+            // 检查支付订单金额
+            // TODO 这里1分钱需要改成实际订单金额
+            if(!totalFee.equals("0.01")){
+                throw new Exception("支付金额不符合 totalFee=" + totalFee);
+            }
+
+            order.setPayId(payId);
+            order.setPayTime(LocalDateTime.now());
+            order.setOrderStatus(OrderUtil.STATUS_PAY);
+            orderService.updateById(order);
+
+            return WxPayNotifyResponse.success("处理成功!");
+        } catch (Exception e) {
+            logger.error("微信回调结果异常,异常原因 " + e.getMessage());
+            return WxPayNotifyResponse.fail(e.getMessage());
+        }
     }
 
 
     /**
-     * 退款取消订单
-     * 1. 检测当前订单是否能够退款取消
-     * 2. 设置订单退款取消状态
-     * 3. TODO 退款
-     * 4. 商品货品数量增加
+     * 订单申请退款
+     * 1. 检测当前订单是否能够退款
+     * 2. 设置订单申请退款状态
      *
      * @param userId 用户ID
      * @param body   订单信息，{ orderId：xxx }
@@ -600,76 +592,8 @@ public class WxOrderController {
             return ResponseUtil.fail(403, "订单不能取消");
         }
 
-        // 开启事务管理
-        DefaultTransactionDefinition def = new DefaultTransactionDefinition();
-        def.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
-        TransactionStatus status = txManager.getTransaction(def);
-        try {
-            // 设置订单取消状态
-            order.setOrderStatus(OrderUtil.STATUS_REFUND);
-            orderService.update(order);
-
-            // 退款操作
-
-            // 商品货品数量增加
-            List<LitemallOrderGoods> orderGoodsList = orderGoodsService.queryByOid(orderId);
-            for (LitemallOrderGoods orderGoods : orderGoodsList) {
-                Integer productId = orderGoods.getProductId();
-                LitemallProduct product = productService.findById(productId);
-                Integer number = product.getGoodsNumber() + orderGoods.getNumber();
-                product.setGoodsNumber(number);
-                productService.updateById(product);
-            }
-        } catch (Exception ex) {
-            txManager.rollback(status);
-            logger.error("系统内部错误", ex);
-            return ResponseUtil.fail(403, "订单退款失败");
-        }
-        txManager.commit(status);
-
-        return ResponseUtil.ok();
-    }
-
-    /**
-     * 发货
-     * 1. 检测当前订单是否能够发货
-     * 2. 设置订单发货状态
-     *
-     * @param userId 用户ID
-     * @param body   订单信息，{ orderId：xxx, shipSn: xxx, shipChannel: xxx }
-     * @return 订单操作结果
-     * 成功则 { errno: 0, errmsg: '成功' }
-     * 失败则 { errno: XXX, errmsg: XXX }
-     */
-    @PostMapping("ship")
-    public Object ship(@LoginUser Integer userId, @RequestBody String body) {
-        if (userId == null) {
-            return ResponseUtil.unlogin();
-        }
-        Integer orderId = JacksonUtil.parseInteger(body, "orderId");
-        String shipSn = JacksonUtil.parseString(body, "shipSn");
-        String shipChannel = JacksonUtil.parseString(body, "shipChannel");
-        if (orderId == null || shipSn == null || shipChannel == null) {
-            return ResponseUtil.badArgument();
-        }
-
-        LitemallOrder order = orderService.findById(orderId);
-        if (order == null) {
-            return ResponseUtil.badArgument();
-        }
-        if (!order.getUserId().equals(userId)) {
-            return ResponseUtil.badArgumentValue();
-        }
-
-        // 如果订单不是已付款状态，则不能发货
-        if (!order.getOrderStatus().equals(OrderUtil.STATUS_PAY)) {
-            return ResponseUtil.fail(403, "订单不能确认收货");
-        }
-
-        order.setOrderStatus(OrderUtil.STATUS_SHIP);
-        order.setShipSn(shipSn);
-        order.setShipChannel(shipChannel);
-        order.setShipStartTime(LocalDateTime.now());
+        // 设置订单申请退款状态
+        order.setOrderStatus(OrderUtil.STATUS_REFUND);
         orderService.update(order);
 
         return ResponseUtil.ok();
@@ -786,93 +710,6 @@ public class WxOrderController {
 
         LitemallOrderGoods orderGoods = orderGoodsList.get(0);
         return ResponseUtil.ok(orderGoods);
-    }
-
-    /**
-     * 自动取消订单
-     *
-     * 定时检查订单未付款情况，如果超时半个小时则自动取消订单
-     * 定时时间是每次相隔半个小时。
-     *
-     * 注意，因为是相隔半小时检查，因此导致有订单是超时一个小时以后才设置取消状态。
-     * TODO
-     * 这里可以进一步地配合用户订单查询时订单未付款检查，如果订单超时半小时则取消。
-     */
-    @Scheduled(fixedDelay = 30*60*1000)
-    public void checkOrderUnpaid() {
-        logger.debug(LocalDateTime.now());
-
-        List<LitemallOrder> orderList = orderService.queryUnpaid();
-        for(LitemallOrder order : orderList){
-            LocalDateTime add = order.getAddTime();
-            LocalDateTime now = LocalDateTime.now();
-            LocalDateTime expired = add.plusMinutes(30);
-            if(expired.isAfter(now)){
-                continue;
-            }
-
-            // 开启事务管理
-            DefaultTransactionDefinition def = new DefaultTransactionDefinition();
-            def.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
-            TransactionStatus status = txManager.getTransaction(def);
-            try {
-                // 设置订单已取消状态
-                order.setOrderStatus(OrderUtil.STATUS_AUTO_CANCEL);
-                order.setEndTime(LocalDateTime.now());
-                orderService.updateById(order);
-
-                // 商品货品数量增加
-                Integer orderId = order.getId();
-                List<LitemallOrderGoods> orderGoodsList = orderGoodsService.queryByOid(orderId);
-                for (LitemallOrderGoods orderGoods : orderGoodsList) {
-                    Integer productId = orderGoods.getProductId();
-                    LitemallProduct product = productService.findById(productId);
-                    Integer number = product.getGoodsNumber() + orderGoods.getNumber();
-                    product.setGoodsNumber(number);
-                    productService.updateById(product);
-                }
-            } catch (Exception ex) {
-                txManager.rollback(status);
-                logger.error("系统内部错误", ex);
-            }
-            txManager.commit(status);
-        }
-    }
-
-    /**
-     * 自动确认订单
-     *
-     * 定时检查订单未确认情况，如果超时七天则自动确认订单
-     * 定时时间是每天凌晨3点。
-     *
-     * 注意，因为是相隔一天检查，因此导致有订单是超时八天以后才设置自动确认。
-     * 这里可以进一步地配合用户订单查询时订单未确认检查，如果订单超时7天则自动确认。
-     * 但是，这里可能不是非常必要。相比订单未付款检查中存在商品资源有限所以应该
-     * 早点清理未付款情况，这里八天再确认是可以的。
-     *
-     * TODO
-     * 目前自动确认是基于管理后台管理员所设置的商品快递到达时间，见orderService.queryUnconfirm。
-     * 那么在实际业务上有可能存在商品寄出以后商品因为一些原因快递最终没有到达，
-     * 也就是商品快递失败而shipEndTime一直是空的情况，因此这里业务可能需要扩展，以防止订单一直
-     * 处于发货状态。
-     */
-    @Scheduled(cron = "0 0 3 * * ?")
-    public void checkOrderUnconfirm() {
-        logger.debug(LocalDateTime.now());
-
-        List<LitemallOrder> orderList = orderService.queryUnconfirm();
-        for(LitemallOrder order : orderList){
-            LocalDateTime shipEnd = order.getShipEndTime();
-            LocalDateTime now = LocalDateTime.now();
-            LocalDateTime expired = shipEnd.plusDays(7);
-            if(expired.isAfter(now)){
-                continue;
-            }
-            // 设置订单已取消状态
-            order.setOrderStatus(OrderUtil.STATUS_AUTO_CONFIRM);
-            order.setConfirmTime(now);
-            orderService.updateById(order);
-        }
     }
 
 }
